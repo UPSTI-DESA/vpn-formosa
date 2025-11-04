@@ -30,7 +30,7 @@ sudo apt install openfortivpn git
 ### 2. Clonar el repositorio
 
 ```bash
-git clone https://github.com/TU_USUARIO/vpn-formosa.git
+git clone https://github.com/UPSTI-DESA/vpn-formosa.git
 cd vpn-formosa
 ```
 
@@ -204,7 +204,7 @@ Este proyecto está bajo la Licencia MIT - ver el archivo [LICENSE](LICENSE) par
 Si tienes problemas:
 
 1. Revisa la sección de [Solución de problemas](#-solución-de-problemas)
-2. Abre un [Issue](https://github.com/TU_USUARIO/vpn-formosa/issues) en GitHub
+2. Abre un [Issue](https://github.com/UPSTI-DESA/vpn-formosa/issues) en GitHub
 3. Contacta al administrador de sistemas de tu organización
 
 ## 🔗 Enlaces útiles
