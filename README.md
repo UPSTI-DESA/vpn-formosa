@@ -185,33 +185,15 @@ Edita las líneas correspondientes y guarda. Luego reinicia:
 vpn restart
 ```
 
-## 🤝 Contribuir
-
-Las contribuciones son bienvenidas. Por favor:
-
-1. Haz fork del repositorio
-2. Crea una rama para tu feature (`git checkout -b feature/AmazingFeature`)
-3. Commit tus cambios (`git commit -m 'Add some AmazingFeature'`)
-4. Push a la rama (`git push origin feature/AmazingFeature`)
-5. Abre un Pull Request
-
 ## 📄 Licencia
 
 Este proyecto está bajo la Licencia MIT - ver el archivo [LICENSE](LICENSE) para más detalles.
 
-## 📞 Soporte
-
-Si tienes problemas:
-
-1. Revisa la sección de [Solución de problemas](#-solución-de-problemas)
-2. Abre un [Issue](https://github.com/UPSTI-DESA/vpn-formosa/issues) en GitHub
-3. Contacta al administrador de sistemas de tu organización
-
 ## 🔗 Enlaces útiles
 
 - [Documentación de OpenFortiVPN](https://github.com/adrienverge/openfortivpn)
-- [Systemd Documentation](https://www.freedesktop.org/software/systemd/man/systemd.service.html)
+
 
 ---
 
-**Desarrollado con ❤️ para facilitar el acceso remoto al Gobierno de Formosa**
+**Desarrollado con ❤️ para facilitar el acceso remoto**
