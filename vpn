@@ -1,6 +1,9 @@
 #!/bin/bash
-
+#
 # VPN Formosa - Cliente FortiVPN multi-perfil con interfaz de consola
+# Autor: Gaston Schneider <gassstonn@gmail.com>
+# Licencia: MIT
+#
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'

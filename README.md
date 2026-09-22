@@ -175,6 +175,10 @@ bash uninstall.sh
 
 Elimina los servicios, los perfiles/credenciales, el comando `vpn` y los alias.
 
+## 👤 Autor
+
+**Gaston Schneider** — [gassstonn@gmail.com](mailto:gassstonn@gmail.com)
+
 ## 📄 Licencia
 
 MIT - ver [LICENSE](LICENSE).

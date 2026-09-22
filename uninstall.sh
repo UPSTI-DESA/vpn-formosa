@@ -1,5 +1,8 @@
 #!/bin/bash
+#
 # Desinstalador VPN Formosa (multi-perfil)
+# Autor: Gaston Schneider <gassstonn@gmail.com>
+# Licencia: MIT
 
 set -e
 

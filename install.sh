@@ -1,5 +1,8 @@
 #!/bin/bash
+#
 # Instalador VPN Formosa - Cliente FortiVPN multi-perfil
+# Autor: Gaston Schneider <gassstonn@gmail.com>
+# Licencia: MIT
 # Compatible con Ubuntu, Debian, Pop!_OS y derivados
 
 set -e
