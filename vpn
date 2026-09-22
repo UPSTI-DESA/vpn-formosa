@@ -374,18 +374,21 @@ restart_vpn() {
     return 1
 }
 
-logs() {
+show_logs() {
     local p="$1" u
     u=$(unit "$p")
-    echo "Logs de VPN Formosa (perfil: $p)"
-    echo "=========================================="
-    echo "Presioná 'q' para salir"
-    sleep 1
     if command -v less >/dev/null 2>&1; then
-        sudo journalctl -u "$u" -n 200 --no-pager | less -R
+        sudo journalctl -u "$u" -n 200 --no-pager | less -R -P "Presioná 'q' para salir   ·   línea %l de %L"
     else
         sudo journalctl -u "$u" -n 200 --no-pager
+        echo ""
+        read -n1 -s -r -p "Presioná una tecla para continuar..." _
+        echo ""
     fi
+}
+
+logs() {
+    show_logs "$1"
 }
 
 list_profiles() {
@@ -532,14 +535,7 @@ menu() {
             4)
                 p=$(pick_profile_text "Ver logs de:") || continue
                 clear 2>/dev/null || true
-                echo "Logs del perfil '$p'  —  Presioná 'q' para salir"
-                echo "=========================================="
-                if command -v less >/dev/null 2>&1; then
-                    sudo journalctl -u "$(unit "$p")" -n 200 --no-pager | less -R
-                else
-                    sudo journalctl -u "$(unit "$p")" -n 200 --no-pager
-                    pause_key
-                fi
+                show_logs "$p"
                 ;;
             5)
                 p=$(pick_profile_text "Reiniciar perfil:") || continue
