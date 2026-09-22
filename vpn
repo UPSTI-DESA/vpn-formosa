@@ -441,6 +441,8 @@ add_profile_simple() {
     port=$(printf '%s\n' "$base_content" | awk -F ' = ' '/^port =/ {print $2; exit}')
     [ -z "$host" ] && host=conexion.formosa.gob.ar
     [ -z "$port" ] && port=10443
+    # Crear el archivo ya con permisos 600 (evita ventana con permisos amplios)
+    sudo install -m 600 /dev/null "$(profile_conf "$p")"
     sudo tee "$(profile_conf "$p")" > /dev/null << EOF
 host = $host
 port = $port
@@ -450,7 +452,6 @@ trusted-cert = $cert
 set-dns = 1
 pppd-use-peerdns = 1
 EOF
-    sudo chmod 600 "$(profile_conf "$p")"
     echo -e "${GREEN}✅ Perfil '$p' creado y asegurado (permisos 600)${NC}"
     echo -e "   Conectar con: ${BLUE}vpn on $p${NC}"
 }

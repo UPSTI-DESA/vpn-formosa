@@ -28,9 +28,11 @@ fi
 echo -e "${YELLOW}⚠️  ATENCIÓN:${NC}"
 echo "Esto eliminará completamente el cliente VPN Formosa:"
 echo "  • Servicios systemd (todos los perfiles)"
-echo "  • Archivos de configuración (incluyendo credenciales)"
+echo "  • TODOS los perfiles de $CONF_DIR (incluyendo credenciales)"
 echo "  • Script de control y comando /usr/local/bin/vpn"
 echo "  • Alias de bash"
+echo ""
+echo -e "${YELLOW}Si tenés otros configs de openfortivpn en $CONF_DIR, se borrarán también.${NC}"
 echo ""
 
 read -p "¿Estás seguro que deseas continuar? (s/N): " -n 1 -r

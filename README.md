@@ -152,7 +152,12 @@ reintentar directamente. Si persiste, mirá los logs con `vpn logs <perfil>`.
 
 ### Evitar el pedido de contraseña de sudo
 
-Opcional: permitir administrar solo los servicios de la VPN sin contraseña.
+Opcional: permitir administrar los servicios de la VPN sin contraseña.
+
+> ⚠️ **Seguridad:** las reglas con comodín (`vpn-formosa@*`) permiten pasar argumentos
+> extra a `systemctl`/`journalctl`, lo que amplía los permisos más de lo deseado.
+> Usalo solo en equipos de un único usuario. En equipos compartidos, dejá que pida
+> contraseña o restringí la regla a nombres de perfil concretos.
 
 ```bash
 sudo tee /etc/sudoers.d/vpn-formosa >/dev/null <<EOF

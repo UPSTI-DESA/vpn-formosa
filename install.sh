@@ -82,6 +82,8 @@ echo -e "${GREEN}✓${NC} Directorio listo"
 
 echo -e "${BLUE}[2/6]${NC} Creando perfil '$VPN_PROFILE'..."
 
+# Crear el archivo ya con permisos 600 (evita ventana con permisos amplios)
+sudo install -m 600 /dev/null "$CONF_FILE"
 sudo tee "$CONF_FILE" > /dev/null << EOF
 host = conexion.formosa.gob.ar
 port = 10443
@@ -91,7 +93,6 @@ trusted-cert = $TRUSTED_CERT
 set-dns = 1
 pppd-use-peerdns = 1
 EOF
-sudo chmod 600 "$CONF_FILE"
 echo "$VPN_PROFILE" | sudo tee "$CONF_DIR/default-profile" > /dev/null
 echo -e "${GREEN}✓${NC} Perfil creado (permisos 600) y marcado como predeterminado"
 
