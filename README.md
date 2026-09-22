@@ -71,22 +71,34 @@ Al elegir un perfil, el menú se cierra, muestra el progreso de conexión y term
 
 En el submenú **Perfiles**: `1-9` para elegir, `n`/`p` para pasar de página, `b` para volver.
 
+Al ver los **logs** (`[4]`), se abre un visor: presioná **`q`** para salir.
+
 ### Comandos
 
 | Comando | Descripción |
 |---------|-------------|
 | `vpn` | Menú interactivo |
-| `vpn on [perfil]` | Conectar un perfil (cierra los demás) |
+| `vpn on [perfil]` | Conectar (sin perfil: conecta el **último usado**) |
 | `vpn off [perfil]` | Desconectar un perfil (sin perfil: todos) |
 | `vpn estado [perfil]` | Ver estado |
 | `vpn restart [perfil]` | Reiniciar un perfil |
-| `vpn logs [perfil]` | Ver logs en tiempo real |
+| `vpn logs [perfil]` | Ver logs (`q` para salir) |
 | `vpn perfiles` | Listar perfiles |
 | `vpn add <perfil>` | Agregar un nuevo usuario/perfil |
 | `vpn rm <perfil>` | Eliminar un perfil (no el base) |
 | `vpn auto-on [perfil]` | Habilitar inicio automático |
 | `vpn auto-off [perfil]` | Deshabilitar inicio automático |
 | `vpn help` | Ayuda |
+
+### Perfil predeterminado
+
+`vpn on` sin argumentos conecta el **último perfil que usaste**. Ese dato se guarda en
+`~/.cache/vpn/last-profile`. El orden de prioridad es:
+
+1. Variable de entorno `VPN_DEFAULT_PROFILE`
+2. Último perfil conectado
+3. Archivo `/etc/openfortivpn/default-profile`
+4. Primer perfil encontrado
 
 ### Ejemplos
 

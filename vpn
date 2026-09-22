@@ -11,6 +11,7 @@ NC='\033[0m'
 
 CONF_DIR=/etc/openfortivpn
 DEFAULT_PROFILE_FILE=/etc/openfortivpn/default-profile
+LAST_PROFILE_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/vpn/last-profile"
 UNIT_TPL="vpn-formosa@"
 TEMPLATE_UNIT="/etc/systemd/system/${UNIT_TPL}.service"
 LEGACY_UNIT="vpn-formosa.service"
@@ -40,23 +41,43 @@ all_profiles() {
     shopt -u nullglob
 }
 
-# Perfil por defecto: variable de entorno > archivo > primer perfil > "principal"
+# Perfil por defecto: env > ultimo conectado > archivo > primer perfil > "principal"
+profile_in_glob() {
+    local f
+    for f in "$CONF_DIR"/*.conf; do
+        [ "$(basename "$f" .conf)" = "$1" ] && return 0
+    done
+    return 1
+}
+
 default_profile() {
+    local p
     if [ -n "${VPN_DEFAULT_PROFILE:-}" ]; then
         printf '%s' "$VPN_DEFAULT_PROFILE"
         return 0
+    fi
+    if [ -r "$LAST_PROFILE_FILE" ]; then
+        p=$(tr -d '[:space:]' < "$LAST_PROFILE_FILE")
+        if [ -n "$p" ] && profile_in_glob "$p"; then
+            printf '%s' "$p"
+            return 0
+        fi
     fi
     if [ -r "$DEFAULT_PROFILE_FILE" ]; then
         tr -d '[:space:]' < "$DEFAULT_PROFILE_FILE"
         return 0
     fi
-    local first
-    first=$(all_profiles | head -n1)
-    if [ -n "$first" ]; then
-        printf '%s' "$first"
+    p=$(all_profiles | head -n1)
+    if [ -n "$p" ]; then
+        printf '%s' "$p"
         return 0
     fi
     printf 'principal'
+}
+
+save_last_profile() {
+    mkdir -p "$(dirname "$LAST_PROFILE_FILE")" 2>/dev/null
+    printf '%s' "$1" > "$LAST_PROFILE_FILE" 2>/dev/null || true
 }
 
 profile_exists() {
@@ -246,6 +267,7 @@ connect() {
         if [ -n "$ip" ]; then
             echo -e "${GREEN}✅ Ya está conectado${NC} (perfil: $p)"
             echo -e "   IP: ${BLUE}$ip${NC}"
+            save_last_profile "$p"
             return 0
         fi
         # Activo pero sin túnel -> reconectar
@@ -269,6 +291,7 @@ connect() {
     if wait_for_tunnel "$u"; then
         echo -e "${GREEN}✅ VPN CONECTADA${NC} (perfil: $p)"
         echo -e "   IP: ${BLUE}$IP${NC}"
+        save_last_profile "$p"
         return 0
     fi
     # Limpiar para no dejar el servicio "activo" sin túnel
@@ -354,9 +377,15 @@ restart_vpn() {
 logs() {
     local p="$1" u
     u=$(unit "$p")
-    echo "Logs de VPN Formosa (perfil: $p) - Ctrl+C para salir:"
+    echo "Logs de VPN Formosa (perfil: $p)"
     echo "=========================================="
-    sudo journalctl -u "$u" -n 50 -f
+    echo "Presioná 'q' para salir"
+    sleep 1
+    if command -v less >/dev/null 2>&1; then
+        sudo journalctl -u "$u" -n 200 --no-pager | less -R
+    else
+        sudo journalctl -u "$u" -n 200 --no-pager
+    fi
 }
 
 list_profiles() {
@@ -503,6 +532,8 @@ menu() {
             4)
                 p=$(pick_profile_text "Ver logs de:") || continue
                 clear 2>/dev/null || true
+                echo "Logs del perfil '$p'  —  Presioná 'q' para salir"
+                echo "=========================================="
                 if command -v less >/dev/null 2>&1; then
                     sudo journalctl -u "$(unit "$p")" -n 200 --no-pager | less -R
                 else
@@ -561,7 +592,7 @@ help() {
     echo ""
     echo "  vpn                   Menú interactivo (teclas directas)"
     echo "  vpn menu              Menú interactivo"
-    echo "  vpn on [perfil]       Conectar un perfil (cierra los demás)"
+    echo "  vpn on [perfil]       Conectar (sin perfil: el último conectado)"
     echo "  vpn off [perfil]      Desconectar un perfil (sin perfil: todos)"
     echo "  vpn estado [perfil]   Ver estado (sin perfil: todos)"
     echo "  vpn restart [perfil]  Reiniciar un perfil"
