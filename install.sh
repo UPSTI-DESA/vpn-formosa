@@ -1,15 +1,16 @@
 #!/bin/bash
-# Instalador VPN Formosa - FortiVPN Client
+# Instalador VPN Formosa - Cliente FortiVPN multi-perfil
 # Compatible con Ubuntu, Debian, Pop!_OS y derivados
 
 set -e
 
-# Colores
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
-NC='\033[0m' # No Color
+NC='\033[0m'
+
+SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo ""
 echo "==========================================="
@@ -17,264 +18,134 @@ echo "   VPN Formosa - Instalador"
 echo "==========================================="
 echo ""
 
-# Verificar que se ejecuta con permisos normales (no root)
-if [ "$EUID" -eq 0 ]; then 
+if [ "$EUID" -eq 0 ]; then
     echo -e "${RED}❌ No ejecutes este script como root o con sudo${NC}"
     echo "Ejecuta: bash install.sh"
     exit 1
 fi
 
-# Verificar que openfortivpn está instalado
 if ! command -v openfortivpn &> /dev/null; then
     echo -e "${RED}❌ openfortivpn no está instalado${NC}"
     echo ""
     echo "Instálalo con:"
-    echo "  sudo apt update"
-    echo "  sudo apt install openfortivpn"
+    echo "  sudo apt update && sudo apt install openfortivpn"
     echo ""
     exit 1
 fi
-
 echo -e "${GREEN}✓${NC} openfortivpn encontrado"
 echo ""
 
-# Solicitar credenciales
-echo -e "${BLUE}Configuración de credenciales:${NC}"
+# ---------- Datos del perfil base ----------
+
+echo -e "${BLUE}Configuración de tu primer perfil:${NC}"
 echo ""
+
+read -p "Nombre del perfil [principal]: " VPN_PROFILE
+VPN_PROFILE="${VPN_PROFILE:-principal}"
+if ! [[ "$VPN_PROFILE" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo -e "${RED}❌ Nombre inválido. Usá solo letras, números, punto, guión o guión bajo.${NC}"
+    exit 1
+fi
 
 read -p "Usuario VPN: " VPN_USER
+if [ -z "$VPN_USER" ]; then
+    echo -e "${RED}❌ El usuario no puede estar vacío${NC}"
+    exit 1
+fi
 
 while true; do
-    read -s -p "Contraseña VPN: " VPN_PASS
-    echo ""
-    read -s -p "Confirmar contraseña: " VPN_PASS2
-    echo ""
-    
+    read -s -p "Contraseña VPN: " VPN_PASS; echo ""
+    read -s -p "Confirmar contraseña: " VPN_PASS2; echo ""
     if [ "$VPN_PASS" = "$VPN_PASS2" ]; then
         break
-    else
-        echo -e "${RED}Las contraseñas no coinciden. Intenta de nuevo.${NC}"
-        echo ""
     fi
+    echo -e "${RED}Las contraseñas no coinciden. Intenta de nuevo.${NC}"
 done
 
-# Escapar caracteres especiales en la contraseña para el archivo de configuración
-VPN_PASS_ESCAPED=$(printf '%s\n' "$VPN_PASS" | sed 's/[&/\]/\\&/g')
+CONF_DIR=/etc/openfortivpn
+CONF_FILE="$CONF_DIR/$VPN_PROFILE.conf"
 
 echo ""
-echo -e "${BLUE}[1/5]${NC} Creando directorios..."
+echo -e "${BLUE}[1/6]${NC} Preparando directorios..."
 
-# Crear directorio de configuración si no existe
-sudo mkdir -p /etc/openfortivpn
-echo -e "${GREEN}✓${NC} Directorio creado"
+sudo mkdir -p "$CONF_DIR"
+TRUSTED_CERT=""
+if [ -f "$CONF_FILE" ]; then
+    TRUSTED_CERT=$(sudo awk -F ' = ' '/^trusted-cert =/ {print $2; exit}' "$CONF_FILE")
+    sudo install -m 600 "$CONF_FILE" "$CONF_FILE.backup-$(date +%Y%m%d-%H%M%S)"
+    echo -e "${GREEN}✓${NC} Copia de seguridad del perfil anterior creada"
+fi
+echo -e "${GREEN}✓${NC} Directorio listo"
 
-echo -e "${BLUE}[2/5]${NC} Creando archivo de configuración..."
+echo -e "${BLUE}[2/6]${NC} Creando perfil '$VPN_PROFILE'..."
 
-# Crear el archivo de configuración
-sudo tee /etc/openfortivpn/formosa.conf > /dev/null << EOF
+sudo tee "$CONF_FILE" > /dev/null << EOF
 host = conexion.formosa.gob.ar
 port = 10443
 username = $VPN_USER
-password = $VPN_PASS_ESCAPED
-trusted-cert = 
+password = $VPN_PASS
+trusted-cert = $TRUSTED_CERT
 set-dns = 1
 pppd-use-peerdns = 1
 EOF
+sudo chmod 600 "$CONF_FILE"
+echo "$VPN_PROFILE" | sudo tee "$CONF_DIR/default-profile" > /dev/null
+echo -e "${GREEN}✓${NC} Perfil creado (permisos 600) y marcado como predeterminado"
 
-sudo chmod 600 /etc/openfortivpn/formosa.conf
-echo -e "${GREEN}✓${NC} Configuración creada y asegurada (permisos 600)"
+echo -e "${BLUE}[3/6]${NC} Instalando servicio systemd (multi-perfil)..."
 
-echo -e "${BLUE}[3/5]${NC} Creando servicio systemd..."
+sudo install -m 644 "$SRC_DIR/vpn-formosa@.service" "/etc/systemd/system/vpn-formosa@.service"
 
-# Crear el servicio systemd
-sudo tee /etc/systemd/system/vpn-formosa.service > /dev/null << 'EOF'
-[Unit]
-Description=VPN Formosa - FortiVPN
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/openfortivpn -c /etc/openfortivpn/formosa.conf
-Restart=on-failure
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl daemon-reload
-echo -e "${GREEN}✓${NC} Servicio systemd creado"
-
-echo -e "${BLUE}[4/5]${NC} Creando scripts de control..."
-
-# Script principal de control
-cat > ~/vpn << 'EOFSCRIPT'
-#!/bin/bash
-
-# Colores
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-case "$1" in
-    ""|on|conectar|start)
-        echo -e "${GREEN}🟢 Conectando VPN Formosa...${NC}"
-        sudo systemctl start vpn-formosa.service
-        sleep 3
-        if systemctl is-active --quiet vpn-formosa.service; then
-            IP=$(ip addr show ppp0 2>/dev/null | grep "inet " | awk '{print $2}')
-            echo -e "${GREEN}✅ VPN CONECTADA${NC}"
-            if [ -n "$IP" ]; then
-                echo -e "   IP: ${BLUE}$IP${NC}"
-            fi
-        else
-            echo -e "${RED}❌ Error al conectar${NC}"
-            echo "Ver logs: vpn logs"
-        fi
-        ;;
-    
-    off|desconectar|stop)
-        echo -e "${RED}🔴 Desconectando VPN...${NC}"
-        sudo systemctl stop vpn-formosa.service
-        sleep 1
-        echo -e "${GREEN}✅ VPN desconectada${NC}"
-        ;;
-    
-    estado|status|-e)
-        if systemctl is-active --quiet vpn-formosa.service; then
-            echo -e "${GREEN}🟢 VPN CONECTADA${NC}"
-            IP=$(ip addr show ppp0 2>/dev/null | grep "inet " | awk '{print $2}')
-            if [ -n "$IP" ]; then
-                echo -e "   IP: ${BLUE}$IP${NC}"
-            fi
-            UPTIME=$(systemctl show vpn-formosa.service --property=ActiveEnterTimestamp --value)
-            if [ -n "$UPTIME" ]; then
-                echo -e "   Conectado desde: $UPTIME"
-            fi
-        else
-            echo -e "${RED}🔴 VPN DESCONECTADA${NC}"
-        fi
-        ;;
-    
-    restart|reiniciar)
-        echo -e "${YELLOW}🔄 Reiniciando VPN...${NC}"
-        sudo systemctl restart vpn-formosa.service
-        sleep 3
-        if systemctl is-active --quiet vpn-formosa.service; then
-            echo -e "${GREEN}✅ VPN reiniciada${NC}"
-        else
-            echo -e "${RED}❌ Error al reiniciar${NC}"
-            echo "Ver logs: vpn logs"
-        fi
-        ;;
-    
-    logs)
-        echo "Logs de VPN Formosa (Ctrl+C para salir):"
-        echo "=========================================="
-        sudo journalctl -u vpn-formosa.service -n 50 -f
-        ;;
-    
-    auto-on)
-        echo -e "${GREEN}Habilitando inicio automático...${NC}"
-        sudo systemctl enable vpn-formosa.service
-        echo -e "${GREEN}✅ VPN se iniciará automáticamente al encender el PC${NC}"
-        ;;
-    
-    auto-off)
-        echo -e "${YELLOW}Deshabilitando inicio automático...${NC}"
-        sudo systemctl disable vpn-formosa.service
-        echo -e "${GREEN}✅ VPN NO se iniciará automáticamente${NC}"
-        ;;
-    
-    help|ayuda|-h|--help)
-        echo "VPN Formosa - Cliente FortiVPN"
-        echo ""
-        echo "Uso: vpn [comando]"
-        echo ""
-        echo "Comandos disponibles:"
-        echo "  (sin comando)    Conectar VPN"
-        echo "  on/conectar      Conectar VPN"
-        echo "  off/desconectar  Desconectar VPN"
-        echo "  estado/-e        Ver estado de la VPN"
-        echo "  restart          Reiniciar VPN"
-        echo "  logs             Ver logs en tiempo real"
-        echo "  auto-on          Habilitar inicio automático"
-        echo "  auto-off         Deshabilitar inicio automático"
-        echo "  help             Mostrar esta ayuda"
-        echo ""
-        echo "Ejemplos:"
-        echo "  vpn              # Conectar"
-        echo "  vpn estado       # Ver estado"
-        echo "  vpn off          # Desconectar"
-        ;;
-    
-    *)
-        echo -e "${RED}❌ Comando desconocido: $1${NC}"
-        echo "Usa 'vpn help' para ver comandos disponibles"
-        exit 1
-        ;;
-esac
-EOFSCRIPT
-
-chmod +x ~/vpn
-echo -e "${GREEN}✓${NC} Script vpn creado en ~/vpn"
-
-# Crear alias en bashrc si no existe
-if ! grep -q "alias vpn=" ~/.bashrc 2>/dev/null; then
-    echo "" >> ~/.bashrc
-    echo "# Alias para VPN Formosa" >> ~/.bashrc
-    echo "alias vpn='~/vpn'" >> ~/.bashrc
-    echo -e "${GREEN}✓${NC} Alias agregado a ~/.bashrc"
-else
-    echo -e "${YELLOW}⚠${NC}  Alias 'vpn' ya existe en ~/.bashrc"
+# Desactivar servicio antiguo de un solo perfil si existía
+if systemctl list-unit-files vpn-formosa.service &>/dev/null; then
+    sudo systemctl disable vpn-formosa.service 2>/dev/null || true
+    sudo systemctl stop vpn-formosa.service 2>/dev/null || true
 fi
+sudo systemctl daemon-reload
+echo -e "${GREEN}✓${NC} Servicio instalado"
 
-echo -e "${BLUE}[5/5]${NC} Obteniendo certificado del servidor..."
+echo -e "${BLUE}[4/6]${NC} Instalando comando 'vpn'..."
+
+sudo install -m 755 "$SRC_DIR/vpn" /usr/local/bin/vpn
+
+# Quitar alias viejo si existía (ya no es necesario)
+if grep -q "alias vpn=" ~/.bashrc 2>/dev/null; then
+    sed -i '/# Alias para VPN Formosa/d; /alias vpn=/d' ~/.bashrc
+    echo -e "${GREEN}✓${NC} Alias antiguo eliminado de ~/.bashrc"
+fi
+echo -e "${GREEN}✓${NC} Comando disponible en /usr/local/bin/vpn"
+
+echo -e "${BLUE}[5/6]${NC} Obteniendo certificado del servidor..."
 echo ""
-
-# Intentar conectar para obtener el certificado
 echo -e "${YELLOW}Se intentará una conexión para obtener el certificado...${NC}"
-echo "Presiona Ctrl+C después de ver el mensaje de error del certificado"
-echo ""
-sleep 2
-
-# Capturar el certificado
-CERT_OUTPUT=$(sudo openfortivpn conexion.formosa.gob.ar:10443 -u "$VPN_USER" 2>&1 || true)
+sleep 1
+CERT_OUTPUT=$(sudo timeout 15 openfortivpn conexion.formosa.gob.ar:10443 -u "$VPN_USER" 2>&1 || true)
 CERT_HASH=$(echo "$CERT_OUTPUT" | grep "trusted-cert" | head -1 | awk '{print $NF}')
-
 if [ -n "$CERT_HASH" ]; then
     echo -e "${GREEN}✓${NC} Certificado obtenido: $CERT_HASH"
-    # Actualizar el archivo de configuración con el certificado
-    sudo sed -i "s/^trusted-cert = $/trusted-cert = $CERT_HASH/" /etc/openfortivpn/formosa.conf
-    echo -e "${GREEN}✓${NC} Certificado agregado a la configuración"
+    sudo sed -i "s/^trusted-cert = .*/trusted-cert = $CERT_HASH/" "$CONF_FILE"
 else
-    echo -e "${YELLOW}⚠${NC}  No se pudo obtener el certificado automáticamente"
-    echo "Lo obtendrás en la primera conexión manual"
+    echo -e "${YELLOW}⚠${NC}  No se pudo obtener automáticamente; se completará en la primera conexión"
 fi
+
+echo -e "${BLUE}[6/6]${NC} Verificando..."
 
 echo ""
 echo "==========================================="
 echo -e "${GREEN}   ✅ INSTALACIÓN COMPLETA${NC}"
 echo "==========================================="
 echo ""
-echo "Comandos disponibles:"
-echo -e "  ${BLUE}vpn${NC}              → Conectar VPN"
-echo -e "  ${BLUE}vpn off${NC}          → Desconectar VPN"
-echo -e "  ${BLUE}vpn estado${NC}       → Ver estado"
-echo -e "  ${BLUE}vpn logs${NC}         → Ver logs"
+echo "Uso rápido:"
+echo -e "  ${BLUE}vpn${NC}              → Menú interactivo"
+echo -e "  ${BLUE}vpn on${NC}           → Conectar perfil '$VPN_PROFILE'"
+echo -e "  ${BLUE}vpn off${NC}          → Desconectar todo"
+echo -e "  ${BLUE}vpn add <perfil>${NC} → Agregar otro usuario VPN"
 echo -e "  ${BLUE}vpn help${NC}         → Ver todos los comandos"
 echo ""
 echo -e "${YELLOW}⚠️  IMPORTANTE:${NC}"
-echo "1. Recarga tu terminal: ${BLUE}source ~/.bashrc${NC}"
-echo "2. O abre una nueva terminal"
-echo "3. Luego ejecuta: ${BLUE}vpn${NC}"
+echo "1. Abrí una terminal nueva (o ejecutá: source ~/.bashrc)"
+echo "2. Luego ejecutá: vpn"
 echo ""
 echo -e "${YELLOW}🔒 Seguridad:${NC}"
-echo "Tu contraseña está en: /etc/openfortivpn/formosa.conf"
-echo "Solo accesible por root (permisos 600)"
+echo "Las contraseñas están en $CONF_DIR/<perfil>.conf (solo root, permisos 600)"
 echo ""

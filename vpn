@@ -1,0 +1,646 @@
+#!/bin/bash
+
+# VPN Formosa - Cliente FortiVPN multi-perfil con interfaz de consola
+
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+CONF_DIR=/etc/openfortivpn
+DEFAULT_PROFILE_FILE=/etc/openfortivpn/default-profile
+UNIT_TPL="vpn-formosa@"
+TEMPLATE_UNIT="/etc/systemd/system/${UNIT_TPL}.service"
+LEGACY_UNIT="vpn-formosa.service"
+
+unit() { echo "${UNIT_TPL}$1.service"; }
+profile_conf() { echo "${CONF_DIR}/$1.conf"; }
+
+tunnel_ip() {
+    ip -4 -o addr show 2>/dev/null | awk '$2 ~ /^ppp[0-9]+$/ {print $4; exit}'
+}
+
+validate_profile() { [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]]; }
+
+is_active() { systemctl is-active --quiet "$(unit "$1")" 2>/dev/null; }
+
+active_profiles() {
+    systemctl list-units --type=service --state=active --no-legend "${UNIT_TPL}*" 2>/dev/null \
+        | awk '{print $1}' | sed -E "s/^${UNIT_TPL}(.*)\.service$/\1/"
+}
+
+all_profiles() {
+    local f
+    shopt -s nullglob
+    for f in "$CONF_DIR"/*.conf; do
+        basename "$f" .conf
+    done
+    shopt -u nullglob
+}
+
+# Perfil por defecto: variable de entorno > archivo > primer perfil > "principal"
+default_profile() {
+    if [ -n "${VPN_DEFAULT_PROFILE:-}" ]; then
+        printf '%s' "$VPN_DEFAULT_PROFILE"
+        return 0
+    fi
+    if [ -r "$DEFAULT_PROFILE_FILE" ]; then
+        tr -d '[:space:]' < "$DEFAULT_PROFILE_FILE"
+        return 0
+    fi
+    local first
+    first=$(all_profiles | head -n1)
+    if [ -n "$first" ]; then
+        printf '%s' "$first"
+        return 0
+    fi
+    printf 'principal'
+}
+
+profile_exists() {
+    # Chequeo sin sudo (lista dir) + fallback con sudo
+    local f
+    for f in "$CONF_DIR"/*.conf; do
+        [ "$(basename "$f" .conf)" = "$1" ] && return 0
+    done
+    sudo test -f "$(profile_conf "$1")" 2>/dev/null
+}
+
+# Instala el servicio plantilla si falta (auto-reparacion) - UNA sola invocacion sudo
+ensure_template() {
+    # Chequeo sin sudo (el archivo es world-readable)
+    if [ -f "$TEMPLATE_UNIT" ]; then
+        return 0
+    fi
+    echo -e "${YELLOW}⚙  Falta el servicio multi-perfil. Instalando (requiere sudo)...${NC}"
+    # Todo en un solo sudo bash -c para un solo prompt
+    sudo bash -c "
+        cat > '$TEMPLATE_UNIT' <<'EOF'
+[Unit]
+Description=VPN Formosa - FortiVPN (perfil %i)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/openfortivpn/%i.conf
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/openfortivpn -c /etc/openfortivpn/%i.conf
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl disable '$LEGACY_UNIT' >/dev/null 2>&1 || true
+        systemctl daemon-reload
+    " || { echo -e "${RED}❌ Falló la instalación del servicio${NC}"; return 1; }
+    echo -e "${GREEN}✓  Servicio instalado${NC}"
+}
+
+stop_other_profiles() {
+    local keep="$1" p
+    if systemctl is-active --quiet "$LEGACY_UNIT" 2>/dev/null; then
+        echo -e "${YELLOW}↩  Cerrando servicio anterior ($LEGACY_UNIT)${NC}"
+        sudo systemctl stop "$LEGACY_UNIT" 2>/dev/null
+    fi
+    for p in $(active_profiles); do
+        [ "$p" = "$keep" ] && continue
+        echo -e "${YELLOW}↩  Cerrando perfil activo: $p${NC}"
+        sudo systemctl stop "$(unit "$p")" 2>/dev/null
+    done
+}
+
+wait_for_tunnel() {
+    local u="$1"
+    echo -n "   ⏳ Estableciendo túnel"
+    for ((attempt = 0; attempt < 20; attempt++)); do
+        IP=$(tunnel_ip)
+        [ -n "$IP" ] && { echo -e " ${GREEN}✓${NC}"; return 0; }
+        systemctl is-active --quiet "$u" 2>/dev/null || { echo -e " ${RED}✗ servicio caído${NC}"; return 1; }
+        echo -n "."
+        sleep 1
+    done
+    echo -e " ${RED}✗ timeout${NC}"
+    return 1
+}
+
+# ---------- UI helpers (menu de texto con teclas directas) ----------
+
+current_active_profile() {
+    local p
+    for p in $(active_profiles); do
+        printf '%s' "$p"
+        return 0
+    done
+}
+
+print_header() {
+    local ip active
+    ip=$(tunnel_ip)
+    active=$(current_active_profile)
+    echo "============================================================"
+    if [ -n "$active" ]; then
+        echo -e "  ${BOLD}VPN FORMOSA${NC}   ${GREEN}● $active ACTIVO${NC}   IP: ${BLUE}${ip:-?}${NC}"
+    else
+        echo -e "  ${BOLD}VPN FORMOSA${NC}   ${RED}○ Desconectado${NC}"
+    fi
+    echo "============================================================"
+}
+
+pause_key() {
+    echo ""
+    read -n1 -s -r -p "  Presioná una tecla para continuar..." _
+    echo ""
+}
+
+read_line() {
+    local prompt="$1" val
+    read -r -p "$prompt " val
+    printf '%s' "$val"
+}
+
+# Selector de perfil paginado con teclas. Imprime el nombre elegido en stdout.
+pick_profile_text() {
+    local prompt="$1" page=0 per_page=9 key i name mark
+    local profs; mapfile -t profs < <(all_profiles)
+    local total=${#profs[@]}
+    if [ "$total" -eq 0 ]; then
+        echo "No hay perfiles configurados." >&2
+        return 1
+    fi
+    if [ "$total" -eq 1 ]; then
+        printf '%s' "${profs[0]}"
+        return 0
+    fi
+    local pages=$(( (total + per_page - 1) / per_page ))
+    while true; do
+        {
+            echo ""
+            echo "  $prompt"
+            echo ""
+            for ((i = 0; i < per_page && page * per_page + i < total; i++)); do
+                name="${profs[page * per_page + i]}"
+                if is_active "$name"; then mark="${GREEN}●${NC}"; else mark="○"; fi
+                printf "   [%d] %b %s\n" $((i + 1)) "$mark" "$name"
+            done
+            [ "$pages" -gt 1 ] && echo "   [n] siguiente   [p] anterior   (pág $((page + 1))/$pages)"
+            echo "   [b] cancelar"
+            echo ""
+        } >&2
+        read -n1 -s -r -p "   Opción: " key
+        echo "" >&2
+        case "$key" in
+            [1-9])
+                local idx=$((page * per_page + key - 1))
+                if [ "$idx" -lt "$total" ]; then
+                    printf '%s' "${profs[idx]}"
+                    return 0
+                fi
+                ;;
+            n|N) [ $((page + 1)) -lt "$pages" ] && page=$((page + 1)) ;;
+            p|P) [ "$page" -gt 0 ] && page=$((page - 1)) ;;
+            b|B|q|Q) return 1 ;;
+        esac
+    done
+}
+
+
+# ---------- Acciones ----------
+
+require_profile_name() {
+    local p="$1" cmd="$2"
+    if [ -z "$p" ]; then
+        echo -e "${RED}❌ Falta el nombre del perfil${NC}"
+        echo "Uso: vpn $cmd <perfil>"
+        return 1
+    fi
+    if ! validate_profile "$p"; then
+        echo -e "${RED}❌ Nombre de perfil inválido: $p${NC}"
+        echo "Usá solo letras, números, punto, guión o guión bajo."
+        return 1
+    fi
+}
+
+connect() {
+    local p="$1" u path ip
+    ensure_template || return 1
+    u=$(unit "$p")
+    path=$(profile_conf "$p")
+    if ! profile_exists "$p"; then
+        echo -e "${RED}❌ No existe el perfil '$p'${NC}"
+        echo "   Ruta esperada: $path"
+        echo "Creá uno con: vpn add $p"
+        echo "Ver perfiles: vpn perfiles"
+        return 1
+    fi
+
+    # Si el servicio ya está activo
+    if systemctl is-active --quiet "$u" 2>/dev/null; then
+        ip=$(tunnel_ip)
+        if [ -n "$ip" ]; then
+            echo -e "${GREEN}✅ Ya está conectado${NC} (perfil: $p)"
+            echo -e "   IP: ${BLUE}$ip${NC}"
+            return 0
+        fi
+        # Activo pero sin túnel -> reconectar
+        echo -e "${YELLOW}⚠  El perfil '$p' estaba activo pero sin túnel. Reconectando...${NC}"
+        stop_other_profiles "$p"
+        if ! sudo systemctl restart "$u"; then
+            echo -e "${RED}❌ Falló al reiniciar el servicio${NC}"
+            echo "Ver logs: vpn logs $p"
+            return 1
+        fi
+    else
+        echo -e "${GREEN}🟢 Conectando VPN Formosa (perfil: $p)...${NC}"
+        stop_other_profiles "$p"
+        if ! sudo systemctl start "$u"; then
+            echo -e "${RED}❌ Falló al iniciar el servicio${NC}"
+            echo "Ver logs: vpn logs $p"
+            return 1
+        fi
+    fi
+
+    if wait_for_tunnel "$u"; then
+        echo -e "${GREEN}✅ VPN CONECTADA${NC} (perfil: $p)"
+        echo -e "   IP: ${BLUE}$IP${NC}"
+        return 0
+    fi
+    # Limpiar para no dejar el servicio "activo" sin túnel
+    sudo systemctl stop "$u" 2>/dev/null
+    echo -e "${RED}❌ No se estableció el túnel VPN (perfil: $p)${NC}"
+    echo "Ver logs: vpn logs $p"
+    return 1
+}
+
+disconnect() {
+    local p="$1" u
+    if [ -z "$p" ]; then
+        for p in $(active_profiles); do
+            echo -e "${RED}🔴 Desconectando perfil: $p${NC}"
+            sudo systemctl stop "$(unit "$p")" 2>/dev/null
+        done
+        sudo systemctl stop "$LEGACY_UNIT" 2>/dev/null || true
+        if [ -z "$(tunnel_ip)" ]; then
+            echo -e "${GREEN}✅ VPN desconectada${NC}"
+            return 0
+        fi
+        echo -e "${YELLOW}⚠  Todavía hay un túnel activo${NC}"
+        return 0
+    fi
+    u=$(unit "$p")
+    echo -e "${RED}🔴 Desconectando VPN (perfil: $p)...${NC}"
+    if sudo systemctl stop "$u" 2>/dev/null; then
+        echo -e "${GREEN}✅ Perfil '$p' desconectado${NC}"
+        return 0
+    fi
+    echo -e "${RED}❌ No se pudo desconectar el perfil '$p'${NC}"
+    return 1
+}
+
+status() {
+    local p="$1" u ip uptime
+    if [ -z "$p" ]; then
+        list_profiles
+        return 0
+    fi
+    u=$(unit "$p")
+    ip=$(tunnel_ip)
+    if systemctl is-active --quiet "$u" 2>/dev/null; then
+        if [ -n "$ip" ]; then
+            echo -e "${GREEN}🟢 VPN CONECTADA${NC} (perfil: $p)"
+            echo -e "   IP: ${BLUE}$ip${NC}"
+            uptime=$(systemctl show "$u" --property=ActiveEnterTimestamp --value 2>/dev/null)
+            [ -n "$uptime" ] && echo -e "   Conectado desde: $uptime"
+            return 0
+        fi
+        echo -e "${YELLOW}🟠 Servicio activo pero SIN túnel${NC} (perfil: $p)"
+        echo "   Probá: vpn on $p  (reconecta)"
+        return 1
+    fi
+    echo -e "${RED}🔴 Perfil '$p' DESCONECTADO${NC}"
+    return 1
+}
+
+restart_vpn() {
+    local p="$1" u
+    ensure_template || return 1
+    u=$(unit "$p")
+    if ! profile_exists "$p"; then
+        echo -e "${RED}❌ No existe el perfil '$p'${NC}"
+        return 1
+    fi
+    echo -e "${YELLOW}🔄 Reiniciando VPN (perfil: $p)...${NC}"
+    if ! sudo systemctl restart "$u"; then
+        echo -e "${RED}❌ Falló al reiniciar el servicio${NC}"
+        echo "Ver logs: vpn logs $p"
+        return 1
+    fi
+    if wait_for_tunnel "$u"; then
+        echo -e "${GREEN}✅ VPN reiniciada${NC} (perfil: $p)"
+        return 0
+    fi
+    sudo systemctl stop "$u" 2>/dev/null
+    echo -e "${RED}❌ No se restableció el túnel VPN (perfil: $p)${NC}"
+    echo "Ver logs: vpn logs $p"
+    return 1
+}
+
+logs() {
+    local p="$1" u
+    u=$(unit "$p")
+    echo "Logs de VPN Formosa (perfil: $p) - Ctrl+C para salir:"
+    echo "=========================================="
+    sudo journalctl -u "$u" -n 50 -f
+}
+
+list_profiles() {
+    local p state
+    echo "Perfiles VPN disponibles (base: $(default_profile)):"
+    for p in $(all_profiles); do
+        if is_active "$p"; then
+            state="${GREEN}● activo${NC}"
+        else
+            state="○ inactivo"
+        fi
+        echo -e "  - $p  $state"
+    done
+}
+
+add_profile_simple() {
+    local p="$1" base cert host port vpn_user vpn_pass vpn_pass2
+    local def; def=$(default_profile)
+    ensure_template || return 1
+    require_profile_name "$p" "add" || return 1
+    if [ "$p" = "$def" ] || profile_exists "$p"; then
+        echo -e "${RED}❌ Ya existe un perfil llamado '$p'${NC}"
+        echo "Elegí otro nombre. Perfiles actuales: vpn perfiles"
+        return 1
+    fi
+    base="$(profile_conf "$def")"
+    if ! profile_exists "$def"; then
+        echo -e "${RED}❌ No existe el perfil base '$def' en $base${NC}"
+        return 1
+    fi
+
+    echo -e "${BLUE}Creando perfil VPN: $p${NC}"
+    read -p "Usuario VPN: " vpn_user
+    [ -z "$vpn_user" ] && { echo -e "${RED}❌ Usuario vacío${NC}"; return 1; }
+    while true; do
+        read -s -p "Contraseña VPN: " vpn_pass; echo ""
+        read -s -p "Confirmar contraseña: " vpn_pass2; echo ""
+        [ "$vpn_pass" = "$vpn_pass2" ] && break
+        echo -e "${RED}Las contraseñas no coinciden. Intenta de nuevo.${NC}"
+    done
+
+    # Leer el perfil base en una sola llamada a sudo
+    local base_content
+    base_content=$(sudo cat "$base" 2>/dev/null)
+    cert=$(printf '%s\n' "$base_content" | awk -F ' = ' '/^trusted-cert =/ {print $2; exit}')
+    host=$(printf '%s\n' "$base_content" | awk -F ' = ' '/^host =/ {print $2; exit}')
+    port=$(printf '%s\n' "$base_content" | awk -F ' = ' '/^port =/ {print $2; exit}')
+    [ -z "$host" ] && host=conexion.formosa.gob.ar
+    [ -z "$port" ] && port=10443
+    sudo tee "$(profile_conf "$p")" > /dev/null << EOF
+host = $host
+port = $port
+username = $vpn_user
+password = $vpn_pass
+trusted-cert = $cert
+set-dns = 1
+pppd-use-peerdns = 1
+EOF
+    sudo chmod 600 "$(profile_conf "$p")"
+    echo -e "${GREEN}✅ Perfil '$p' creado y asegurado (permisos 600)${NC}"
+    echo -e "   Conectar con: ${BLUE}vpn on $p${NC}"
+}
+
+remove_profile() {
+    local p="$1" def; def=$(default_profile)
+    require_profile_name "$p" "rm" || return 1
+    if [ "$p" = "$def" ]; then
+        echo -e "${RED}❌ No se puede eliminar el perfil base '$def'${NC}"
+        return 1
+    fi
+    if ! profile_exists "$p"; then
+        echo -e "${RED}❌ No existe el perfil '$p'${NC}"
+        return 1
+    fi
+    if ! read -r -p "¿Eliminar el perfil '$p'? (s/N): " resp || true; then
+        :
+    fi
+    [[ "$resp" =~ ^[sS]$ ]] || { echo "Cancelado"; return 1; }
+    sudo systemctl stop "$(unit "$p")" 2>/dev/null
+    sudo systemctl disable "$(unit "$p")" 2>/dev/null
+    sudo rm -f "$(profile_conf "$p")"
+    echo -e "${GREEN}✅ Perfil '$p' eliminado${NC}"
+}
+
+auto_on() {
+    local p="$1" u
+    ensure_template || return 1
+    u=$(unit "$p")
+    echo -e "${GREEN}Habilitando inicio automático (perfil: $p)...${NC}"
+    sudo systemctl enable "$u"
+    echo -e "${GREEN}✅ El perfil '$p' se iniciará automáticamente al encender el PC${NC}"
+}
+
+auto_off() {
+    local p="$1" u
+    ensure_template || return 1
+    u=$(unit "$p")
+    echo -e "${YELLOW}Deshabilitando inicio automático (perfil: $p)...${NC}"
+    sudo systemctl disable "$u"
+    echo -e "${GREEN}✅ El perfil '$p' NO se iniciará automáticamente${NC}"
+}
+
+# ---------- Menu interactivo (teclas directas) ----------
+
+menu() {
+    local opt p n
+    while true; do
+        clear 2>/dev/null || true
+        print_header
+        n=$(all_profiles | wc -l)
+        echo ""
+        echo -e "   ${BOLD}[1]${NC} Perfiles ($n)"
+        echo -e "   ${BOLD}[2]${NC} Agregar perfil"
+        echo -e "   ${BOLD}[3]${NC} Eliminar perfil"
+        echo -e "   ${BOLD}[4]${NC} Ver logs"
+        echo -e "   ${BOLD}[5]${NC} Reiniciar perfil"
+        echo -e "   ${BOLD}[6]${NC} Estado detallado"
+        echo -e "   ${BOLD}[q]${NC} Salir"
+        echo ""
+        read -n1 -s -r -p "   Opción: " opt
+        echo ""
+        case "$opt" in
+            1)
+                menu_perfiles
+                [ $? -eq 1 ] && return 0
+                ;;
+            2)
+                p=$(read_line "   Nombre del nuevo perfil (sin espacios):")
+                if [ -z "$p" ]; then continue; fi
+                echo ""
+                if add_profile_simple "$p"; then
+                    echo -e "   ${GREEN}✅ Perfil '$p' creado.${NC}"
+                else
+                    echo -e "   ${RED}❌ No se pudo crear el perfil '$p'.${NC}"
+                fi
+                pause_key
+                ;;
+            3)
+                p=$(pick_profile_text "Perfil a eliminar:") || continue
+                [ "$p" = "$(default_profile)" ] && { echo -e "   ${RED}No se puede eliminar el perfil base '$(default_profile)'.${NC}"; pause_key; continue; }
+                remove_profile "$p"
+                pause_key
+                ;;
+            4)
+                p=$(pick_profile_text "Ver logs de:") || continue
+                clear 2>/dev/null || true
+                if command -v less >/dev/null 2>&1; then
+                    sudo journalctl -u "$(unit "$p")" -n 200 --no-pager | less -R
+                else
+                    sudo journalctl -u "$(unit "$p")" -n 200 --no-pager
+                    pause_key
+                fi
+                ;;
+            5)
+                p=$(pick_profile_text "Reiniciar perfil:") || continue
+                clear 2>/dev/null || true
+                restart_vpn "$p"
+                pause_key
+                ;;
+            6)
+                clear 2>/dev/null || true
+                print_header
+                echo ""
+                echo -e "   IP túnel: ${BLUE}$(tunnel_ip)${NC}"
+                echo ""
+                for p in $(all_profiles); do
+                    if is_active "$p"; then
+                        echo -e "   ${GREEN}●${NC} $p  (ACTIVO)"
+                    else
+                        echo -e "   ○ $p"
+                    fi
+                done
+                pause_key
+                ;;
+            q|Q)
+                return 0
+                ;;
+        esac
+    done
+}
+
+menu_perfiles() {
+    local sel
+    clear 2>/dev/null || true
+    print_header
+    sel=$(pick_profile_text "Elegí un perfil para conectar/desconectar:") || return 0
+    clear 2>/dev/null || true
+    if is_active "$sel"; then
+        disconnect "$sel"
+    else
+        connect "$sel"
+    fi
+    return 1
+}
+
+# ---------- Ayuda ----------
+
+help() {
+    echo "VPN Formosa - Cliente FortiVPN (multi-perfil)"
+    echo ""
+    echo "Uso: vpn [comando] [perfil]"
+    echo ""
+    echo "  vpn                   Menú interactivo (teclas directas)"
+    echo "  vpn menu              Menú interactivo"
+    echo "  vpn on [perfil]       Conectar un perfil (cierra los demás)"
+    echo "  vpn off [perfil]      Desconectar un perfil (sin perfil: todos)"
+    echo "  vpn estado [perfil]   Ver estado (sin perfil: todos)"
+    echo "  vpn restart [perfil]  Reiniciar un perfil"
+    echo "  vpn logs [perfil]     Ver logs en tiempo real"
+    echo "  vpn perfiles          Listar perfiles disponibles"
+    echo "  vpn add <perfil>      Crear un nuevo perfil"
+    echo "  vpn rm <perfil>       Eliminar un perfil (no el base)"
+    echo "  vpn auto-on [perfil]  Habilitar inicio automático"
+    echo "  vpn auto-off [perfil] Deshabilitar inicio automático"
+    echo "  vpn help              Mostrar esta ayuda"
+    echo ""
+    echo "En el menú: 1 Perfiles  2 Agregar  3 Eliminar  4 Logs  5 Reiniciar"
+    echo "            6 Estado   q Salir   (en Perfiles: 1-9 elegir, n/p página, b volver)"
+    echo "Al conectar un perfil, el menú se cierra y muestra el progreso."
+    echo ""
+    echo "Ejemplos:"
+    echo "  vpn                   # Menú interactivo"
+    echo "  vpn add juan          # Crear perfil 'juan'"
+    echo "  vpn on juan           # Conectar perfil 'juan'"
+    echo "  vpn off               # Desconectar todos"
+}
+
+# ---------- Main ----------
+
+CMD="${1:-menu}"
+DEF_PROFILE="$(default_profile)"
+
+case "$CMD" in
+    menu|ui|"" )
+        menu
+        ;;
+
+    on|conectar|start)
+        connect "${2:-$DEF_PROFILE}" || exit 1
+        ;;
+
+    off|desconectar|stop)
+        disconnect "$2" || exit 1
+        ;;
+
+    estado|status|-e)
+        status "$2" || exit 1
+        ;;
+
+    restart|reiniciar)
+        restart_vpn "${2:-$DEF_PROFILE}" || exit 1
+        ;;
+
+    logs)
+        logs "${2:-$DEF_PROFILE}" || exit 1
+        ;;
+
+    perfiles|list|ls)
+        list_profiles
+        ;;
+
+    add|agregar|nuevo)
+        add_profile_simple "$2" || exit 1
+        ;;
+
+    rm|remove|eliminar)
+        remove_profile "$2" || exit 1
+        ;;
+
+    auto-on)
+        auto_on "${2:-$DEF_PROFILE}" || exit 1
+        ;;
+
+    auto-off)
+        auto_off "${2:-$DEF_PROFILE}" || exit 1
+        ;;
+
+    help|ayuda|-h|--help)
+        help
+        ;;
+
+    *)
+        echo -e "${RED}❌ Comando desconocido: $1${NC}"
+        echo "Usa 'vpn help' para ver comandos disponibles"
+        exit 1
+        ;;
+esac

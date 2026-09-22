@@ -1,0 +1,18 @@
+[Unit]
+Description=VPN Formosa - FortiVPN (perfil %i)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/openfortivpn/%i.conf
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/openfortivpn -c /etc/openfortivpn/%i.conf
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
